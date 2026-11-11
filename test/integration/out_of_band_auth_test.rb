@@ -1,120 +1,145 @@
-require File.expand_path('../../test_helper', __FILE__)
+require_relative '../test_helper'
 
 class OutOfBandAuthTest < Redmine::IntegrationTest
-  include Redmine::I18n
-
-  fixtures :users, :email_addresses, :user_preferences, :roles,
-    :projects, :members, :member_roles, :issues, :issue_statuses,
-    :trackers, :enumerations, :custom_fields, :auth_sources, :queries
+  include OutOfBandAuthTestHelpers
 
   def setup
-    User.current = nil
+    @user = User.find(2)
+    @user.update!(twofa_scheme: 'email', must_change_passwd: false)
+    AuthSourceOutOfBand.delete_all
     ActionMailer::Base.deliveries.clear
+    Setting.twofa = '1'
   end
 
-  def test_check_out_of_band_auth_with_not_password_auth_and_not_must_change_password
-    assert !User.current.logged?
-
-    get '/out_of_band_auths/login'
-    assert_redirected_to "/login?back_url=http%3A%2F%2F#{@request.host}%2Fout_of_band_auths%2Flogin"
-
-    get '/my/page'
-    assert_redirected_to "/login?back_url=http%3A%2F%2F#{@request.host}%2Fmy%2Fpage"
-
-    post '/logout'
-    assert_redirected_to home_url
+  def password_login(**extra)
+    post '/login', params: { username: 'jsmith', password: 'jsmith' }.merge(extra)
+    assert_redirected_to '/account/twofa/confirm'
   end
 
-  def test_check_out_of_band_auth_with_password_auth_and_not_must_change_password
-    user = User.find(2) # jsmith
-    user.must_change_passwd = false
-    user.save!
-
-    [ '0', '1' ].each do |value|
-      user.pref.enabled_out_of_band_auth = value
-      user.pref.save!
-
-      assert_login('jsmith', 'jsmith')
-
-      if user.enabled_out_of_band_auth?
-        assert_response_for_enabled_out_of_band_auth
-      else
-        assert_response_for_disabled_out_of_band_auth
-      end
-
-      post '/logout'
-      assert_redirected_to home_url
+  def test_login_requires_code_before_creating_authenticated_session
+    password_login
+    code = emailed_code
+    ['/my/page', '/my/account', '/my/api_key'].each do |path|
+      get path
+      assert_redirected_to %r{/login}
     end
-  end
-
-  def test_check_out_of_band_auth_with_password_auth_and_must_change_password
-    user = User.find(2) # jsmith
-    user.must_change_passwd = true
-    user.save!
-
-    [ '0', '1' ].each do |value|
-      user.pref.enabled_out_of_band_auth = value
-      user.pref.save!
-
-      assert_login('jsmith', 'jsmith')
-
-      get '/my/page'
-      assert_redirected_to '/my/password'
-
-      get '/out_of_band_auths/login'
-      assert_redirected_to '/my/password'
-
-      post '/logout'
-      assert_redirected_to home_url
-    end
-  end
-
-  def test_post_login
-    user = User.find(2) # jsmith
-    user.must_change_passwd = false
-    user.save!
-
-    user.pref.enabled_out_of_band_auth = '1'
-    user.pref.save!
-
-    assert_login('jsmith', 'jsmith')
-    assert_verification_code_mail(user)
-
-    # invalid verification code
-    post '/out_of_band_auths/login', password: 'dummy verification code'
-    assert_response :success
-    assert_include 'Verification code is invalid', response.body
-    assert_select 'h2', 'Out of Band Authentication'
-    assert_response_for_enabled_out_of_band_auth
-
-    # valid verification code
-    post '/out_of_band_auths/login', password: User.current.verification_code
+    post '/account/twofa', params: { twofa_code: code }
     assert_redirected_to '/my/page'
-    assert_response_for_disabled_out_of_band_auth
+    get '/my/page'
+    assert_response :success
+    assert_not OutOfBandAuth::Email.new(@user).verify_otp!(code)
   end
 
-  def test_verification_code_changes_with_each_login
-    verification_codes = []
+  def test_invalid_codes_never_authenticate_and_lock_the_native_session
+    password_login
+    3.times { post '/account/twofa', params: { twofa_code: 'invalid' } }
+    assert_redirected_to '/'
+    post '/account/twofa', params: { twofa_code: emailed_code }
+    assert_redirected_to '/'
+    get '/my/account'
+    assert_redirected_to %r{/login}
+  end
 
-    # dlopper, rhill, someone
-    [ 3, 4, 7 ].each do |user_id|
-      user = User.find(user_id)
-      user.must_change_passwd = false
-      user.save!
-
-      user.pref.enabled_out_of_band_auth = '1'
-      user.pref.save!
-
-      3.times do |i|
-        assert_login(user.login, 'foo')
-        assert_verification_code_mail(user)
-        verification_codes << user.verification_code
-      end
+  def test_pending_session_expires
+    password_login
+    code = emailed_code
+    travel 121.seconds do
+      post '/account/twofa', params: { twofa_code: code }
+      assert_redirected_to '/'
     end
+  end
 
-    # e.g. ["309981", "600116", "553776", "545553", "852046", "501467", "371304", "322618", "845179"]
-    assert_equal 9, verification_codes.count
-    assert_equal 9, verification_codes.uniq.count
+  def test_autologin_cookie_is_only_issued_after_code
+    with_settings autologin: '7' do
+      password_login(autologin: '1')
+      assert_nil cookies['autologin']
+      post '/account/twofa', params: { twofa_code: emailed_code }
+      assert_redirected_to '/my/page'
+      assert cookies['autologin'].present?
+    end
+  end
+
+  def test_native_totp_is_unchanged_and_does_not_send_email_code
+    @user.update!(twofa_scheme: 'totp', twofa_totp_key: ROTP::Base32.random)
+    assert_no_difference('ActionMailer::Base.deliveries.size') { password_login }
+    post '/account/twofa', params: { twofa_code: ROTP::TOTP.new(@user.twofa_totp_key).now }
+    assert_redirected_to '/my/page'
+    get '/my/page'
+    assert_response :success
+  end
+
+  def test_password_change_is_required_after_email_confirmation
+    @user.update!(must_change_passwd: true)
+    password_login
+    post '/account/twofa', params: { twofa_code: emailed_code }
+    get '/my/page'
+    assert_redirected_to '/my/password'
+  end
+
+  def test_unconfigured_user_can_login_when_twofa_optional
+    @user.update!(twofa_scheme: nil)
+    post '/login', params: { username: 'jsmith', password: 'jsmith' }
+    assert_redirected_to '/my/page'
+    get '/my/page'
+    assert_response :success
+  end
+
+  def test_required_twofa_offers_both_email_and_totp
+    @user.update!(twofa_scheme: nil)
+    with_settings twofa: '2' do
+      post '/login', params: { username: 'jsmith', password: 'jsmith' }
+      get '/my/page'
+      assert_redirected_to '/my/twofa/select_scheme'
+      follow_redirect!
+      assert_select 'input[name=scheme][value=email]'
+      assert_select 'input[name=scheme][value=totp]'
+    end
+  end
+
+  def test_pairing_requires_email_confirmation_and_preserves_native_settings_ui
+    @user.update!(twofa_scheme: nil)
+    post '/login', params: { username: 'jsmith', password: 'jsmith' }
+    post '/my/twofa/email/activate/init'
+    assert_redirected_to '/my/twofa/email/activate/confirm'
+    follow_redirect!
+    assert_response :success
+    assert_nil @user.reload.twofa_scheme
+    post '/my/twofa/email/activate', params: { twofa_code: emailed_code }
+    assert_redirected_to '/my/account'
+    assert_equal 'email', @user.reload.twofa_scheme
+    get '/my/account'
+    assert_response :success
+  end
+
+  def test_existing_totp_cannot_be_overwritten_by_email_pairing
+    @user.update!(twofa_scheme: 'totp', twofa_totp_key: ROTP::Base32.random)
+    password_login
+    post '/account/twofa', params: { twofa_code: ROTP::TOTP.new(@user.twofa_totp_key).now }
+    post '/my/twofa/email/activate/init'
+    assert_redirected_to '/my/account'
+    assert_equal 'totp', @user.reload.twofa_scheme
+    assert_equal 0, AuthSourceOutOfBand.count
+  end
+  def test_email_can_be_deactivated_with_native_confirmation
+    password_login
+    post '/account/twofa', params: { twofa_code: emailed_code }
+    travel 31.seconds do
+      post '/my/twofa/email/deactivate/init'
+      assert_redirected_to '/my/twofa/email/deactivate/confirm'
+      post '/my/twofa/email/deactivate', params: { twofa_code: emailed_code }
+      assert_redirected_to '/my/account'
+      assert_nil @user.reload.twofa_scheme
+      assert_not AuthSourceOutOfBand.where(user_id: @user.id).exists?
+    end
+  end
+
+  def test_login_accepts_native_backup_code
+    backup = OutOfBandAuth::Email.new(@user).init_backup_codes!.first.value
+    password_login
+    post '/account/twofa', params: { twofa_code: backup }
+    assert_redirected_to '/my/page'
+    get '/my/page'
+    assert_response :success
   end
 
 end

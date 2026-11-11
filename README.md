@@ -1,45 +1,82 @@
-# Redmine Out of Band Auth (2 factor authentication, 2FA)
+# Redmine Out of Band Auth
 
-[![Build Status](https://travis-ci.org/matsukei/redmine_out_of_band_auth.svg?branch=master)](https://travis-ci.org/matsukei/redmine_out_of_band_auth)
-
-Redmine plugin that provides Out of Band authentication by email.
+Email verification as a native two-factor authentication scheme for **Redmine 7.0**.
+Plugin version 2.0.0 is tested with Redmine 7.0.3, Rails 8.1.4, Ruby 4.0.9 and SQLite.
+Older Redmine versions need the legacy plugin version.
 
 ## Usage
 
-* Check the `Enable out of band authentication` checkbox on the `Administrator > Users > username` or `My account page`.
-  * Will send a `verification code` to the default notification email address from the next login.
-* If you want to encrypt the `verification code`, register `database_cipher_key` in `your_redmine_path/config/configuration.yml` .
-  * If you are already registering SCM or LDAP password, please carefully read the notes in `your_redmine_path/config/configuration.yml`, such as by running `rake db:encrypt RAILS_ENV=production` .
+1. Configure Redmine's outgoing email and verify delivery with its test-email function.
+2. Enable optional or required two-factor authentication in Administration → Settings.
+3. Open My account → Enable email verification, then enter the code sent to your primary email address.
+4. Generate and securely retain Redmine's standard backup codes.
 
-## Screenshot
+The plugin uses Redmine's existing login, enrollment, deactivation, administrator reset,
+backup-code and mandatory-2FA controls. Redmine supports one active scheme per user:
+email **or** an authenticator app (TOTP). Existing TOTP settings are preserved;
+email is not a fallback that bypasses an active TOTP scheme. Deactivate the current
+scheme through Redmine before choosing another. Email authentication depends on the
+security and availability of the mailbox; use TOTP when a separate authenticator is needed.
 
-*Out of Band Authentication*
+## Install and upgrade
 
-![out_of_band_auth](https://user-images.githubusercontent.com/943541/27113242-b8037c56-50f6-11e7-9164-8f894a9568da.png)
+Back up the database and plugin before upgrading. Install this checkout as
+`plugins/redmine_out_of_band_auth` inside Redmine, then run from the Redmine root:
 
-*My account*
+```sh
+bundle install
+RAILS_ENV=production bundle exec rake redmine:plugins:migrate NAME=redmine_out_of_band_auth
+RAILS_ENV=production bundle exec rake assets:precompile
+```
 
-![my_account](https://user-images.githubusercontent.com/943541/27113251-bcd7bb5c-50f6-11e7-8510-93449c68897f.png)
+Restart all application processes. Use the same stable Rails secret key across all
+application instances; changing it invalidates outstanding email challenges.
 
-*Verification code*
+The migration converts legacy `enabled_out_of_band_auth` users to the native email
+scheme only when they have no existing 2FA scheme. Existing TOTP/other schemes win.
+Migrated users' existing login sessions and remember-me tokens are revoked by Redmine.
+If native 2FA was disabled and email users were migrated, its setting becomes **optional**
+so those users can complete login. Other users are not automatically enrolled.
+Legacy verification codes are discarded and the plaintext-code column is removed.
+This migration is irreversible: restore the pre-upgrade backup to downgrade.
+The old checkbox, custom login endpoint and ciphering-task overrides are removed.
 
-![verification_code](https://user-images.githubusercontent.com/943541/27115125-84d8007e-5103-11e7-9a9c-8f676eaa3aad.png)
+## Security behavior
 
-## Install
+- Password authentication does not establish a logged-in session or a remember-me
+  cookie until Redmine's second-factor check succeeds.
+- Codes are generated with `SecureRandom`, expire after two minutes, and are consumed
+  under a database row lock. Only a keyed SHA-256 HMAC is stored, bound to the user.
+- A challenge allows three failed/successful verification attempts in total. Resending
+  does not reset its remaining attempt budget. After exhaustion, wait until expiry.
+- Emails are throttled to one per user per 30 seconds; a resend replaces the old code.
+  During the cooldown no new email is sent. Redmine also limits the pending login session.
+- Standard Redmine behavior for REST API keys and completed remember-me logins remains
+  in effect; this plugin does not add interactive 2FA to API requests.
 
-1. git clone or copy an unarchived plugin to plugins/redmine_out_of_band_auth on your Redmine path.
-2. `$ cd your_redmine_path`
-3. `$ bundle install`
-4. `$ bundle exec rake redmine:plugins:migrate NAME=redmine_out_of_band_auth RAILS_ENV=production`
-5. web service restart
+## Tests
+
+Docker is sufficient; no local Ruby or SMTP credentials are required:
+
+```sh
+docker build -t redmine-oob-test test/docker
+docker run --rm --network none \
+  --mount "type=bind,src=$PWD,dst=/usr/src/redmine/plugins/redmine_out_of_band_auth,readonly" \
+  redmine-oob-test bash plugins/redmine_out_of_band_auth/test/run.sh
+```
+
+Behind a TLS-inspecting proxy, pass the trusted CA bundle to the build with
+`--secret id=ca,src=/path/to/ca-bundle.pem`; certificate verification stays enabled.
+The disposable container tests a legacy database upgrade, eager loading, authentication,
+TOTP coexistence, expiration, replay, attempt/resend limits, enrollment, backup codes,
+and development class reloading. GitHub Actions runs the same commands.
 
 ## Uninstall
 
-1. `$ cd your_redmine_path`
-2. `$ bundle exec rake redmine:plugins:migrate NAME=redmine_out_of_band_auth RAILS_ENV=production VERSION=0`
-3. remove plugins/redmine_out_of_band_auth
-4. web service restart
+Deactivate email authentication for all enrolled users through Redmine **before** removing
+the plugin, otherwise they will have an unavailable 2FA scheme. Keep the data backup;
+the security upgrade cannot be reversed with a down migration.
 
 ## License
 
-[The MIT License](https://opensource.org/licenses/MIT)
+[MIT](LICENSE)

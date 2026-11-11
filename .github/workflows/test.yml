@@ -1,0 +1,16 @@
+name: Redmine 7 tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Redmine test environment
+        run: docker build -t redmine-oob-test test/docker
+      - name: Test upgrade, authentication and class loading
+        run: >-
+          docker run --rm --network none
+          --mount type=bind,src=${{ github.workspace }},dst=/usr/src/redmine/plugins/redmine_out_of_band_auth,readonly
+          redmine-oob-test bash plugins/redmine_out_of_band_auth/test/run.sh

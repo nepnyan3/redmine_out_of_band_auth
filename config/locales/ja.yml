@@ -5,3 +5,7 @@ ja:
   mail_body_verification_code: "%{code} があなたの確認コードです。"
   mail_subject_verification_code: "%{value} 確認コードの送信"
   field_verification_code: 確認コード
+
+  twofa__email__name: メール認証コード
+  twofa__email__text_pairing_info_html: "主メールアドレスに送信されたコードを入力してください。有効期限は2分です。"
+  twofa__email__label_activate: メール認証を有効にする

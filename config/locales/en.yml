@@ -5,3 +5,7 @@ en:
   mail_body_verification_code: "%{code} is your verification code."
   mail_subject_verification_code: "%{value} Send verification code"
   field_verification_code: Verification code
+
+  twofa__email__name: Email verification code
+  twofa__email__text_pairing_info_html: "Enter the code sent to your primary email address. Codes expire after two minutes."
+  twofa__email__label_activate: Enable email verification
