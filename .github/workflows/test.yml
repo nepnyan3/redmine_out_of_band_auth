@@ -7,6 +7,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Build Redmine test environment
         run: docker build -t redmine-oob-test test/docker
       - name: Test upgrade, authentication and class loading
@@ -14,3 +16,6 @@ jobs:
           docker run --rm --network none
           --mount type=bind,src=${{ github.workspace }},dst=/usr/src/redmine/plugins/redmine_out_of_band_auth,readonly
           redmine-oob-test bash plugins/redmine_out_of_band_auth/test/run.sh
+
+      - name: Test real Redmine 3.4 database upgrade
+        run: bash test/upgrade/run.sh

@@ -10,6 +10,11 @@ class IntegrateNativeTwofa < ActiveRecord::Migration[7.2]
     remove_index :auth_source_out_of_bands, :user_id
     add_index :auth_source_out_of_bands, :user_id, unique: true
 
+    # Core and plugin migrations can run in the same rake process. Refresh
+    # model metadata loaded before Redmine added its native 2FA columns.
+    User.reset_column_information
+    UserPreference.reset_column_information
+
     migrated = false
     User.find_each do |user|
       next unless user.pref[:enabled_out_of_band_auth] == '1'
